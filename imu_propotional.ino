@@ -18,6 +18,9 @@ float gyroZ_ofset = 0;
 unsigned long sonKomutZamani = 0;
 unsigned long sonMesafeZamani = 0; // Mesafe gönderimi için zamanlayıcı
 
+// YENİ: Vites yönünü hafızada tutacak değişken
+bool ileriYonde = true; 
+
 void setup() {
   Serial.begin(115200);
 
@@ -25,9 +28,12 @@ void setup() {
   pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
   
-  // Ultrasonik Pinleri
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
+
+  // MPU gürültü kalkanı (Motorlar dönerken sensör kilitlenmesini önler)
+  Wire.begin();
+  Wire.setWireTimeout(25000, true); 
 
   if (!mpu.begin()) {
     while (1) { delay(10); }
@@ -46,11 +52,8 @@ void setup() {
   }
   gyroZ_ofset = toplam / 200.0;
   
-  while (Serial.available() == 0) {
-    motorlariSur(0, 0);
-    delay(10);
-  }
-  sonKomutZamani = millis(); 
+  // Zıplama ve sonsuz döngü tuzakları buradan tamamen temizlendi!
+  // Araç doğrudan loop'a inip güvenli bir şekilde uyku modunda komut bekleyecek.
 }
 
 void loop() {
@@ -61,7 +64,15 @@ void loop() {
     
     if (komut == "DUR") {
       motorlariSur(0, 0);
-      while(true) { delay(100); }
+    }
+    // YENİ: İleri ve Geri vites komutları
+    else if (komut == "ILERI") {
+      ileriYonde = true;
+      sonKomutZamani = millis();
+    }
+    else if (komut == "GERI") {
+      ileriYonde = false;
+      sonKomutZamani = millis();
     }
     else if (komut.startsWith("L:")) {
       hedefDonusHizi_DegS = komut.substring(2).toFloat();
@@ -79,18 +90,15 @@ void loop() {
     digitalWrite(trigPin, LOW);
     
     // Timeout'u 10ms (10000us) yaptık. En fazla ~1.7m uzağı bekler.
-    // Yoksa hemen döner, PID ve Seri Haberleşme kilitlenmez!
     duration = pulseIn(echoPin, HIGH, 10000); 
     
     int mesafe;
     if (duration == 0) {
-      // Ses dönmediyse (1.7m'den uzaksa) mesafe 0 değil, "Sonsuz (999)" olsun
       mesafe = 999; 
     } else {
       mesafe = (duration * 0.034) / 2;
     }
     
-    // Pi tarafında okumak için format: "M:15"
     Serial.print("M:");
     Serial.println(mesafe);
     
@@ -98,7 +106,8 @@ void loop() {
   }
 
   // 3. GÜVENLİK VE PID SÜRÜŞÜ 
-  if (millis() - sonKomutZamani > 500) {
+  // YENİ: Timeout süresi 500ms'den 200ms'ye düşürüldü
+  if (millis() - sonKomutZamani > 200) {
     motorlariSur(0, 0);
   } 
   else {
@@ -113,6 +122,12 @@ void loop() {
 
     float hata = hedefDonusHizi_DegS - gercekDonusHizi_DegS;
     float duzeltme = Kp * hata;
+    duzeltme = constrain(duzeltme, -40, 40);
+    // YENİ: Kinematik Tersinme (Geri viteste hata yönünü ters çevir)
+    if (!ileriYonde) {
+      duzeltme = -duzeltme;
+      tabanHiz += 20;
+    }
 
     int solMotorHiz = constrain(tabanHiz + duzeltme, 0, 255); 
     int sagMotorHiz = constrain(tabanHiz - duzeltme, 0, 255);
@@ -121,6 +136,7 @@ void loop() {
   }
 }
 
+// YENİ: Geri vites destekli motor sürücü
 void motorlariSur(int solHiz, int sagHiz) {
   if (solHiz == 0 && sagHiz == 0) {
     digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
@@ -128,6 +144,14 @@ void motorlariSur(int solHiz, int sagHiz) {
     analogWrite(ENA, 0); analogWrite(ENB, 0);
     return;
   }
-  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); analogWrite(ENA, sagHiz);
-  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); analogWrite(ENB, solHiz);
+  
+  if (ileriYonde) {
+    // İleri sürüş pin konfigürasyonu
+    digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); analogWrite(ENA, sagHiz);
+    digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); analogWrite(ENB, solHiz);
+  } else {
+    // Geri sürüş (Pinler terslendi)
+    digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH); analogWrite(ENA, sagHiz);
+    digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH); analogWrite(ENB, solHiz);
+  }
 }

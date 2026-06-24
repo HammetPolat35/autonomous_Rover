@@ -3,7 +3,7 @@ import numpy as np
 import serial
 import time
 import math
-
+import socket
 
 # ---------------------------------------------------------
 # 1. CAMERA MANAGER
@@ -24,10 +24,10 @@ class CameraManager:
             print("KRİTİK HATA: Kamera açılamadı!")
 
         self.src = np.float32([
-            [137, 169],  # 1. Sol Üst (Ufka doğru biraz daha yukarı çekildi ve açıldı)
-            [547, 189],  # 2. Sağ Üst
-            [1263, 480],  # 3. Sağ Alt (Ekranın sağına taştı, OpenCV bunu kusursuz işler)
-            [-628, 480]  # 4. Sol Alt (Ekranın soluna taştı, sorun yok)
+            [136, 236],   # 1. Sol Üst (Kamerada okuduğun gerçek değer)
+            [522, 236],   # 2. Sağ Üst (Kamerada okuduğun gerçek değer)
+            [1043, 480],  # 3. Sağ Alt (22.5 cm referansından hesaplandı)
+            [-385, 480]   # 4. Sol Alt (22.5 cm referansından hesaplandı)
         ])
 
         self.dst = np.float32([
@@ -60,7 +60,7 @@ class CameraManager:
 # 2. LANE TRACKER 
 # ---------------------------------------------------------
 class LaneTracker:
-    def __init__(self, px_to_cm_x=0.0656, px_to_cm_y=0.09375, mechanical_offset_y=29.5):
+    def __init__(self, px_to_cm_x=0.0656, px_to_cm_y=0.09375, mechanical_offset_y=32.8):
         self.left_fit = None
         self.right_fit = None
         self.px_to_cm_x = px_to_cm_x
@@ -253,25 +253,41 @@ class PurePursuitController:
 # ---------------------------------------------------------
 # 4. SERIAL COMMUNICATOR 
 # ---------------------------------------------------------
-class SerialCommunicator:
-    def __init__(self, port_name="/dev/ttyUSB0", baud_rate=115200):
+class Communicator:
+    def __init__(self, port_name="/dev/ttyUSB0", baud_rate=115200, udp_port=5001):
+        # --- 1. ARDUINO (SERIAL) BAĞLANTISI ---
         self.port_name = port_name
         self.baud_rate = baud_rate
         self.is_connected = False
         try:
             self.serial_connection = serial.Serial(self.port_name, self.baud_rate, timeout=0.1)
             self.is_connected = True
-            print(f"Connected to Arduino on {self.port_name}")
-            import time
-            print("[BİLGİ] Arduino'nun uyanması ve jiroskopun sıfırlanması için 2 saniye bekleniyor...")
+            print(f"[BİLGİ] Arduino'ya {self.port_name} üzerinden bağlanıldı.")
+            print("[BİLGİ] Arduino'nun uyanması için 2 saniye bekleniyor...")
             time.sleep(2.0)
-            
         except Exception as e:
-            print(f"Serial Connection Error: {e}")
-            
+            print(f"[HATA] Serial Bağlantı Hatası: {e}")
+
+        # --- 2. UBUNTU KONTROL (UDP) BAĞLANTISI ---
+        self.udp_port = udp_port
+        try:
+            self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_sock.bind(("0.0.0.0", self.udp_port))
+            self.udp_sock.setblocking(False) # Bekleme yapmadan oku
+            print(f"[BİLGİ] UDP Soketi {self.udp_port} portunda dinlemeye başladı.")
+        except Exception as e:
+            print(f"[HATA] UDP Soket Hatası: {e}")
+
+    # --- ARDUINO KOMUTLARI ---
     def send_ang_vel(self, ang_vel):
         if self.is_connected:
             packet = f"L:{ang_vel:.1f}\n"
+            self.serial_connection.write(packet.encode('utf-8'))
+
+    def send_direct_command(self, cmd_str):
+        """Arduino'ya doğrudan ILERI, GERI, DUR gibi metin komutları yollar."""
+        if self.is_connected:
+            packet = f"{cmd_str}\n"
             self.serial_connection.write(packet.encode('utf-8'))
 
     def read_telemetry(self):
@@ -282,16 +298,26 @@ class SerialCommunicator:
     def send_emergency_stop(self):
         if self.is_connected:
             try:
-                # Arduino'daki while(true) kilidini tetikleyecek komut
                 self.serial_connection.write("DUR\n".encode('utf-8'))
                 self.serial_connection.flush() 
-                import time
                 time.sleep(0.2)
                 self.serial_connection.close()
                 self.is_connected = False
-                print("[BİLGİ] Arduino'ya DUR komutu iletildi ve seri port kapatıldı.")
+                print("[BİLGİ] Arduino'ya DUR komutu iletildi ve port kapatıldı.")
             except Exception as e:
                 print(f"[HATA] Seri port kapatılırken sorun oluştu: {e}")
+
+    # --- UBUNTU KOMUTLARI (YENİ) ---
+    def read_udp_command(self):
+        """Ağdaki tüm birikmiş eski paketleri silip sadece en son gelen komutu okur."""
+        son_komut = None
+        while True:
+            try:
+                data, _ = self.udp_sock.recvfrom(1024)
+                son_komut = data.decode('utf-8')
+            except BlockingIOError:
+                break
+        return son_komut
 
 
 # ---------------------------------------------------------
@@ -301,11 +327,13 @@ class Rover:
     def __init__(self):
         self.camera = CameraManager(width=640, height=480)
         self.tracker = LaneTracker(px_to_cm_x=0.0656, px_to_cm_y=0.09375, mechanical_offset_y=29.5)
-        self.controller = PurePursuitController(steering_gain=110.0, max_angular_vel=90.0)
-        self.communicator = SerialCommunicator(port_name="/dev/ttyUSB0", baud_rate=115200)
+        self.controller = PurePursuitController(steering_gain=130.0, max_angular_vel=90.0)
+        self.communicator = Communicator(port_name="/dev/ttyUSB0", baud_rate=115200, udp_port=5001)
 
         self.system_state = "RUNNING"
         self.current_lane = "RIGHT"
+        self.mode = "ON_ROAD"
+        self.is_moving = False
         self.obstacle_count = 0
         # --- GSTREAMER H264 YAYIN ---
         target_ip = "10.42.0.112"
@@ -314,7 +342,7 @@ class Rover:
 
         pipe_out = (
             f"appsrc ! videoconvert ! video/x-raw,format=I420 ! "
-            f"x264enc tune=zerolatency bitrate=1000 speed-preset=ultrafast ! "
+            f"x264enc tune=zerolatency bitrate=1000 speed-preset=ultrafast ! "  
             f"rtph264pay config-interval=1 pt=96 ! "
             f"udpsink host={target_ip} port=5000 sync=false"
         )
@@ -324,12 +352,22 @@ class Rover:
         if not self.stream.isOpened():
             print("KRİTİK HATA: VideoWriter (Yayıncı) başlatılamadı!")
 
-    def stream_to_ubuntu(self, debug_frame, warped_binary, target_x_pixel, ang_vel):
+    # DÜZELTME: current_action parametresi eklendi
+    def stream_to_ubuntu(self, debug_frame, warped_binary, target_x_pixel, ang_vel, current_action):
         pts = self.camera.src.astype(np.int32)
         cv2.polylines(debug_frame, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
         cv2.putText(debug_frame, f"AngVel: {ang_vel:.1f} Deg/s", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        if self.mode == "ON_ROAD":
+            mode_color = (0, 255, 0)     # On-Road için Yeşil
+            display_action = current_action
+        else:
+            mode_color = (0, 165, 255)   # Off-Road için Turuncu
+            display_action = "MANUEL"
 
+        cv2.putText(debug_frame, f"MOD: {self.mode}", (20, 80),cv2.FONT_HERSHEY_SIMPLEX, 1, mode_color, 2)
+        cv2.putText(debug_frame, f"is_moving: {self.is_moving}", (20, 100),cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+        cv2.putText(debug_frame, f"Action: {display_action}", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         warped_rgb = cv2.cvtColor(warped_binary, cv2.COLOR_GRAY2BGR)
         plot_y = np.linspace(0, self.camera.h - 1, self.camera.h)
 
@@ -351,76 +389,106 @@ class Rover:
         self.stream.write(combined_frame)
 
     def run_autonomous_loop(self):
-        print(f"Otonom sürüş ve 10.42.0.112:5000 (H264) yayını başladı!")
-        print("Durdurmak için terminalde Ctrl+C basın.")
+        print(f"Sistem Başladı! Mod: {self.mode}. UDP komutları bekleniyor...")
         current_action = "KEEP_LANE"
-        start_time = time.time()
-        lane_change_triggered = False  # Sadece bir kere tetiklensin diye bayrak
         
+        # OFF-ROAD için anlık durum takibi
+        current_offroad_cmd = None
+
         try:
             while self.system_state == "RUNNING":
                 telemetry = self.communicator.read_telemetry()
+                display_ang_vel = 0.0 
 
-                if not lane_change_triggered and (time.time() - start_time > 0.3):
-                    print("\n[TEST] 5 Saniye doldu! Sola şerit değiştirme testi başlatılıyor...")
-                    current_action = "CHANGE_LEFT"
-                    lane_change_triggered = True
-
-                if telemetry is not None and telemetry.startswith("M:"):
-                    try:
-                        mesafe = int(telemetry.split(":")[1])
-                        
-                        if mesafe < 30:
-                            self.obstacle_count += 1
-                            
-                            # Eğer 5 defa ardışık olarak 30cm altı geldiyse
-                            if self.obstacle_count >= 5:
-                                print(f"\n[BİLGİ] {self.current_lane} şeridinde engel! Şerit değiştiriliyor...")
-                                
-                                # Aracın o anki şeridine göre zıt şeride geçiş eylemini başlat
-                                if self.current_lane == "RIGHT":
-                                    current_action = "CHANGE_LEFT"
-                                elif self.current_lane == "LEFT":
-                                    current_action = "CHANGE_RIGHT"
-                                    
-                                # Sayacı sıfırla ki sürekli şerit değiştirme komutu atmasın
-                                self.obstacle_count = 0 
+                cmd = self.communicator.read_udp_command()
+                
+                if cmd:
+                    if cmd == "MODE_TOGGLE":
+                        if self.mode == "ON_ROAD":
+                            self.mode = "OFF_ROAD"
                         else:
-                            # Eğer engel kalkarsa veya sensör aradan boşluk görürse sayacı sıfırla (False-positive engelleme)
-                            self.obstacle_count = 0
-                            
-                    except ValueError:
-                        pass
-                if current_action == "CHANGE_LEFT":
-                    if (self.tracker.prev_left_base is not None) and (self.tracker.prev_left_base > 320):
-                        self.tracker.prev_right_base = self.tracker.prev_left_base
-                        self.tracker.prev_left_base = None
-                        self.current_lane = "LEFT"
-                        current_action = "KEEP_LANE"
+                            self.mode = "ON_ROAD"
+                        self.is_moving = False  
+                        current_offroad_cmd = None
+                        print(f"\n[MOD DEĞİŞTİ] Yeni Mod: {self.mode}")
 
-                elif current_action == "CHANGE_RIGHT":
-                    if (self.tracker.prev_right_base is not None) and (self.tracker.prev_right_base < 320):
-                        self.tracker.prev_left_base = self.tracker.prev_right_base
-                        self.tracker.prev_right_base = None
-                        self.current_lane = "RIGHT"
-                        current_action = "KEEP_LANE"
+                    # --- ON_ROAD MODUNDA TETİKLEME ---
+                    elif self.mode == "ON_ROAD":
+                        if cmd == "CMD_W":
+                            self.is_moving = True
+                            self.communicator.send_direct_command("ILERI") 
+                            print("[ON-ROAD] Şerit Takibi Başladı!")
+                        elif cmd == "CMD_S":
+                            self.is_moving = False
+                            print("[ON-ROAD] Araç Duraklatıldı.")
+                        elif cmd == "CMD_A" and self.is_moving:
+                            current_action = "CHANGE_LEFT" 
+                            print("[ON-ROAD] Sol Şeride Geçiş Tetiklendi!")
+                        elif cmd == "CMD_D" and self.is_moving:
+                            current_action = "CHANGE_RIGHT" 
+                            print("[ON-ROAD] Sağ Şeride Geçiş Tetiklendi!")
+
+                    # --- OFF_ROAD MODU DURUM GÜNCELLEMESİ ---
+                    elif self.mode == "OFF_ROAD":
+                        current_offroad_cmd = cmd # Son gelen komutu kaydet
+                        # Timeout mekanizmasını Pi tarafına taşıyoruz
+                        self.last_cmd_time = time.time()
 
                 debug_frame, binary_map = self.camera.process_frame()
+                
                 if binary_map is None: 
-                    print("Uyarı: Kameradan boş kare (None) geldi!")
                     time.sleep(0.1)
                     continue
 
-                self.tracker.detect_lanes(binary_map)
+                target_x_pixel = None
 
-                self.tracker.set_lookahead_y()
+                # --- ON_ROAD SÜRÜŞ MANTIĞI ---
+                if self.mode == "ON_ROAD" and self.is_moving:
+                    if current_action == "CHANGE_LEFT":
+                        if (self.tracker.prev_left_base is not None) and (self.tracker.prev_left_base > 320):
+                            self.tracker.prev_right_base = self.tracker.prev_left_base
+                            self.tracker.prev_left_base = None
+                            self.current_lane = "LEFT"
+                            current_action = "KEEP_LANE" 
+                            print("[ON-ROAD] Sol Şeride Geçiş Tamamlandı!")
 
-                target_x_cm, target_y_cm, target_x_pixel = self.tracker.get_target_carrot(frame_width=self.camera.w, frame_height=self.camera.h, action=current_action)
+                    elif current_action == "CHANGE_RIGHT":
+                        if (self.tracker.prev_right_base is not None) and (self.tracker.prev_right_base < 320):
+                            self.tracker.prev_left_base = self.tracker.prev_right_base
+                            self.tracker.prev_right_base = None
+                            self.current_lane = "RIGHT"
+                            current_action = "KEEP_LANE" 
+                            print("[ON-ROAD] Sağ Şeride Geçiş Tamamlandı!")
 
-                ang_vel = self.controller.compute_target_angular_velocity(target_x_cm, target_y_cm)
-                self.communicator.send_ang_vel(ang_vel)
+                    self.tracker.detect_lanes(binary_map)
+                    self.tracker.set_lookahead_y()
+                    target_x_cm, target_y_cm, target_x_pixel = self.tracker.get_target_carrot(frame_width=self.camera.w, frame_height=self.camera.h, action=current_action)
+                    
+                    display_ang_vel = self.controller.compute_target_angular_velocity(target_x_cm, target_y_cm)
+                    self.communicator.send_ang_vel(display_ang_vel)
 
-                self.stream_to_ubuntu(debug_frame, binary_map, target_x_pixel, ang_vel)
+                # --- OFF_ROAD SÜRÜŞ MANTIĞI ---
+                elif self.mode == "OFF_ROAD":
+                    # EĞER SON 0.3 SANİYEDİR TUŞA BASILMIYORSA ARACI DURDUR
+                    if hasattr(self, 'last_cmd_time') and (time.time() - self.last_cmd_time > 0.3):
+                        current_offroad_cmd = None
+                        
+                    if current_offroad_cmd == "CMD_W":
+                        self.communicator.send_direct_command("ILERI")
+                        self.communicator.send_ang_vel(0) 
+                        display_ang_vel = 0.0
+                    elif current_offroad_cmd == "CMD_S":
+                        self.communicator.send_direct_command("GERI")
+                        self.communicator.send_ang_vel(0) 
+                        display_ang_vel = 0.0
+                    elif current_offroad_cmd == "CMD_A":
+                        self.communicator.send_ang_vel(-60) 
+                        display_ang_vel = -60.0  
+                    elif current_offroad_cmd == "CMD_D":
+                        self.communicator.send_ang_vel(60) 
+                        display_ang_vel = 60.0
+
+                self.stream_to_ubuntu(debug_frame, binary_map, target_x_pixel, display_ang_vel, current_action)
 
         except KeyboardInterrupt:
             self.emergency_stop()
