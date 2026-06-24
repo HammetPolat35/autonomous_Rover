@@ -4,6 +4,7 @@ import serial
 import time
 import math
 import socket
+import json
 
 # ---------------------------------------------------------
 # 1. CAMERA MANAGER
@@ -401,38 +402,45 @@ class Rover:
                 display_ang_vel = 0.0 
 
                 cmd = self.communicator.read_udp_command()
-                
+
                 if cmd:
-                    if cmd == "MODE_TOGGLE":
-                        if self.mode == "ON_ROAD":
-                            self.mode = "OFF_ROAD"
-                        else:
-                            self.mode = "ON_ROAD"
-                        self.is_moving = False  
-                        current_offroad_cmd = None
-                        print(f"\n[MOD DEĞİŞTİ] Yeni Mod: {self.mode}")
-
-                    # --- ON_ROAD MODUNDA TETİKLEME ---
-                    elif self.mode == "ON_ROAD":
-                        if cmd == "CMD_W":
-                            self.is_moving = True
-                            self.communicator.send_direct_command("ILERI") 
-                            print("[ON-ROAD] Şerit Takibi Başladı!")
-                        elif cmd == "CMD_S":
+                    # Try JSON format first (from gesture client): {"run": bool}
+                    try:
+                        msg = json.loads(cmd)
+                        run = msg.get("run", False)
+                        self.is_moving = bool(run)
+                    except (ValueError, TypeError):
+                        # Fall back to legacy string commands (CMD_W/A/S/D, MODE_TOGGLE)
+                        if cmd == "MODE_TOGGLE":
+                            if self.mode == "ON_ROAD":
+                                self.mode = "OFF_ROAD"
+                            else:
+                                self.mode = "ON_ROAD"
                             self.is_moving = False
-                            print("[ON-ROAD] Araç Duraklatıldı.")
-                        elif cmd == "CMD_A" and self.is_moving:
-                            current_action = "CHANGE_LEFT" 
-                            print("[ON-ROAD] Sol Şeride Geçiş Tetiklendi!")
-                        elif cmd == "CMD_D" and self.is_moving:
-                            current_action = "CHANGE_RIGHT" 
-                            print("[ON-ROAD] Sağ Şeride Geçiş Tetiklendi!")
+                            current_offroad_cmd = None
+                            print(f"\n[MOD DEĞİŞTİ] Yeni Mod: {self.mode}")
 
-                    # --- OFF_ROAD MODU DURUM GÜNCELLEMESİ ---
-                    elif self.mode == "OFF_ROAD":
-                        current_offroad_cmd = cmd # Son gelen komutu kaydet
-                        # Timeout mekanizmasını Pi tarafına taşıyoruz
-                        self.last_cmd_time = time.time()
+                        # --- ON_ROAD MODUNDA TETİKLEME ---
+                        elif self.mode == "ON_ROAD":
+                            if cmd == "CMD_W":
+                                self.is_moving = True
+                                self.communicator.send_direct_command("ILERI")
+                                print("[ON-ROAD] Şerit Takibi Başladı!")
+                            elif cmd == "CMD_S":
+                                self.is_moving = False
+                                print("[ON-ROAD] Araç Duraklatıldı.")
+                            elif cmd == "CMD_A" and self.is_moving:
+                                current_action = "CHANGE_LEFT"
+                                print("[ON-ROAD] Sol Şeride Geçiş Tetiklendi!")
+                            elif cmd == "CMD_D" and self.is_moving:
+                                current_action = "CHANGE_RIGHT"
+                                print("[ON-ROAD] Sağ Şeride Geçiş Tetiklendi!")
+
+                        # --- OFF_ROAD MODU DURUM GÜNCELLEMESİ ---
+                        elif self.mode == "OFF_ROAD":
+                            current_offroad_cmd = cmd # Son gelen komutu kaydet
+                            # Timeout mekanizmasını Pi tarafına taşıyoruz
+                            self.last_cmd_time = time.time()
 
                 debug_frame, binary_map = self.camera.process_frame()
                 
@@ -488,7 +496,9 @@ class Rover:
                         self.communicator.send_ang_vel(60) 
                         display_ang_vel = 60.0
 
-                self.stream_to_ubuntu(debug_frame, binary_map, target_x_pixel, display_ang_vel, current_action)
+                # stream_to_ubuntu(debug_frame, ...) is disabled — GStreamer pipe write was
+                # blocking the control loop and causing UDP read stalls. Monitor separately if needed.
+                # self.stream_to_ubuntu(debug_frame, binary_map, target_x_pixel, display_ang_vel, current_action)
 
         except KeyboardInterrupt:
             self.emergency_stop()
