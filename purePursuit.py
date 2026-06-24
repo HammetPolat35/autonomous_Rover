@@ -404,13 +404,15 @@ class Rover:
                 cmd = self.communicator.read_udp_command()
 
                 if cmd:
+                    print(f"[RX] {cmd}")
                     # Try JSON format first (from gesture client): {"run": bool}
                     try:
                         msg = json.loads(cmd)
                         run = msg.get("run", False)
                         self.is_moving = bool(run)
+                        print(f"[CMD] is_moving={self.is_moving}, mode={self.mode}")
                     except (ValueError, TypeError):
-                        # Fall back to legacy string commands (CMD_W/A/S/D, MODE_TOGGLE)
+                        # Fall back to string commands (keyboard via pynput)
                         if cmd == "MODE_TOGGLE":
                             if self.mode == "ON_ROAD":
                                 self.mode = "OFF_ROAD"
@@ -419,6 +421,21 @@ class Rover:
                             self.is_moving = False
                             current_offroad_cmd = None
                             print(f"\n[MOD DEĞİŞTİ] Yeni Mod: {self.mode}")
+
+                        elif cmd == "ESTOP":
+                            self.is_moving = False
+                            current_offroad_cmd = None
+                            print("[E-STOP] Araç Durduruldu!")
+
+                        elif cmd == "LANE_LEFT":
+                            if self.mode == "ON_ROAD" and self.is_moving:
+                                current_action = "CHANGE_LEFT"
+                                print("[ON-ROAD] Sol Şeride Geçiş Tetiklendi!")
+
+                        elif cmd == "LANE_RIGHT":
+                            if self.mode == "ON_ROAD" and self.is_moving:
+                                current_action = "CHANGE_RIGHT"
+                                print("[ON-ROAD] Sağ Şeride Geçiş Tetiklendi!")
 
                         # --- ON_ROAD MODUNDA TETİKLEME ---
                         elif self.mode == "ON_ROAD":
@@ -429,12 +446,6 @@ class Rover:
                             elif cmd == "CMD_S":
                                 self.is_moving = False
                                 print("[ON-ROAD] Araç Duraklatıldı.")
-                            elif cmd == "CMD_A" and self.is_moving:
-                                current_action = "CHANGE_LEFT"
-                                print("[ON-ROAD] Sol Şeride Geçiş Tetiklendi!")
-                            elif cmd == "CMD_D" and self.is_moving:
-                                current_action = "CHANGE_RIGHT"
-                                print("[ON-ROAD] Sağ Şeride Geçiş Tetiklendi!")
 
                         # --- OFF_ROAD MODU DURUM GÜNCELLEMESİ ---
                         elif self.mode == "OFF_ROAD":
