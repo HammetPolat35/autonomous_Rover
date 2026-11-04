@@ -327,7 +327,7 @@ class Communicator:
 class Rover:
     def __init__(self):
         self.camera = CameraManager(width=640, height=480)
-        self.tracker = LaneTracker(px_to_cm_x=0.0656, px_to_cm_y=0.09375, mechanical_offset_y=29.5)
+        self.tracker = LaneTracker(px_to_cm_x=0.0656, px_to_cm_y=0.09375, mechanical_offset_y=32.8)
         self.controller = PurePursuitController(steering_gain=130.0, max_angular_vel=90.0)
         self.communicator = Communicator(port_name="/dev/ttyUSB0", baud_rate=115200, udp_port=5001)
 
@@ -484,7 +484,7 @@ class Rover:
                     target_x_cm, target_y_cm, target_x_pixel = self.tracker.get_target_carrot(frame_width=self.camera.w, frame_height=self.camera.h, action=current_action)
                     
                     display_ang_vel = self.controller.compute_target_angular_velocity(target_x_cm, target_y_cm)
-                    self.communicator.send_ang_vel(display_ang_vel)
+                    #self.communicator.send_ang_vel(display_ang_vel)
 
                 # --- OFF_ROAD SÜRÜŞ MANTIĞI ---
                 elif self.mode == "OFF_ROAD":

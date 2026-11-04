@@ -51,13 +51,10 @@ void setup() {
     delay(5);
   }
   gyroZ_ofset = toplam / 200.0;
-  
-  // Zıplama ve sonsuz döngü tuzakları buradan tamamen temizlendi!
-  // Araç doğrudan loop'a inip güvenli bir şekilde uyku modunda komut bekleyecek.
 }
 
 void loop() {
-  // 1. KOMUT OKUMA
+  // --- 1. KOMUT OKUMA ---
   if (Serial.available() > 0) {
     String komut = Serial.readStringUntil('\n');
     komut.trim(); 
@@ -65,7 +62,6 @@ void loop() {
     if (komut == "DUR") {
       motorlariSur(0, 0);
     }
-    // YENİ: İleri ve Geri vites komutları
     else if (komut == "ILERI") {
       ileriYonde = true;
       sonKomutZamani = millis();
@@ -80,7 +76,7 @@ void loop() {
     }
   }
 
-  // 2. ULTRASONİK SENSÖR OKUMA VE Pİ'YE GÖNDERME
+  // --- 2. ULTRASONİK SENSÖR OKUMA VE Pİ'YE GÖNDERME ---
   if (millis() - sonMesafeZamani > 100) {
     long duration;
     digitalWrite(trigPin, LOW);
@@ -105,17 +101,18 @@ void loop() {
     sonMesafeZamani = millis();
   }
 
-  // 3. GÜVENLİK VE PID SÜRÜŞÜ 
-  // YENİ: Timeout süresi 500ms'den 200ms'ye düşürüldü
+  // --- 3. GÜVENLİK VE PID SÜRÜŞÜ ---
   if (millis() - sonKomutZamani > 200) {
-    motorlariSur(0, 0);
+    motorlariSur(0, 0); // Güvenlik kilidi (Deadman Switch)
   } 
   else {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
+    
+    // 3.1: PID DÖNÜŞ HESAPLAMALARI
     float gercekDonusHizi_DegS = (g.gyro.z - gyroZ_ofset) * 57.2958;
-
     int aciSiddeti = (int)abs(hedefDonusHizi_DegS); 
+    
     if (aciSiddeti <= 10) tabanHiz = map(aciSiddeti, 0, 10, 100, 80); 
     else if (aciSiddeti <= 30) tabanHiz = map(aciSiddeti, 10, 30, 80, 60); 
     else tabanHiz = 60;
@@ -123,14 +120,14 @@ void loop() {
     float hata = hedefDonusHizi_DegS - gercekDonusHizi_DegS;
     float duzeltme = Kp * hata;
     duzeltme = constrain(duzeltme, -40, 40);
-    // YENİ: Kinematik Tersinme (Geri viteste hata yönünü ters çevir)
     if (!ileriYonde) {
       duzeltme = -duzeltme;
-      tabanHiz += 20;
+      tabanHiz += 20; // Geri vites için tork takviyesi
     }
 
-    int solMotorHiz = constrain(tabanHiz + duzeltme, 0, 255); 
-    int sagMotorHiz = constrain(tabanHiz - duzeltme, 0, 255);
+    // 3.2: MOTORLARI SÜR VE SINIRLARI KORU (Sınırlar 0-255 yapıldı)
+    int solMotorHiz = constrain(tabanHiz + duzeltme, 0, 150); 
+    int sagMotorHiz = constrain(tabanHiz - duzeltme, 0, 150);
 
     motorlariSur(solMotorHiz, sagMotorHiz);
   }
