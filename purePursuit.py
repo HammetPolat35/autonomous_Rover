@@ -484,7 +484,7 @@ class Rover:
                     target_x_cm, target_y_cm, target_x_pixel = self.tracker.get_target_carrot(frame_width=self.camera.w, frame_height=self.camera.h, action=current_action)
                     
                     display_ang_vel = self.controller.compute_target_angular_velocity(target_x_cm, target_y_cm)
-                    #self.communicator.send_ang_vel(display_ang_vel)
+                    self.communicator.send_ang_vel(display_ang_vel)
 
                 # --- OFF_ROAD SÜRÜŞ MANTIĞI ---
                 elif self.mode == "OFF_ROAD":
